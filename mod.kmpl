@@ -1,0 +1,499 @@
+// Reads TOML: strings, numbers, booleans, arrays, tables, dotted keys and
+// comments. Dates, inline tables, multi-line strings and arrays of tables are
+// refused with an error.
+
+import (find, is_digit, join, parse_int, parse_real, replace, split, to_lower, from_code) from "std:text";
+
+enum Value {
+    Text(string),
+    Int(int),
+    Real(real),
+    Bool(bool),
+    Array([Value]),
+    // In the order of the file. A language without maps needs a list here,
+    // and it is short for a configuration file.
+    Table([(string, Value)]),
+}
+
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+// ----- reading a document -----
+
+// The whole document as a table, or a message with the number of the line.
+fn parse(source: string) -> Result<Value, string> {
+    let c = source.chars();
+    let root: [(string, Value)] = [];
+    let current: [string] = [];
+    let headers: [string] = [];
+    let i = skip_trivia(c, 0);
+
+    while i < c.length() {
+        if c[i] == "[" {
+            if at(c, i + 1) == "[" {
+                return fail(c, i, "arrays of tables are not supported");
+            }
+            match key_path(c, i + 1) {
+                Result::Ok(got) => {
+                    let (path, after) = got;
+                    let close = skip_spaces(c, after);
+                    if at(c, close) != "]" {
+                        return fail(c, close, "expected `]`");
+                    }
+                    let name = join(path, ".");
+                    if listed(headers, name) {
+                        return fail(c, i, "table `" + name + "` is defined twice");
+                    }
+                    headers = push(headers, name);
+                    current = path;
+
+                    match with_table(root, path) {
+                        Result::Ok(updated) => { root = updated; }
+                        Result::Err(message) => { return fail(c, i, message); }
+                    }
+                    i = close + 1;
+                }
+                Result::Err(message) => { return Result::Err(message); }
+            }
+        } else {
+            match key_value(c, i) {
+                Result::Ok(got) => {
+                    let (path, value, after) = got;
+                    match with_value(root, concat(current, path), value) {
+                        Result::Ok(updated) => { root = updated; }
+                        Result::Err(message) => { return fail(c, i, message); }
+                    }
+                    i = after;
+                }
+                Result::Err(message) => { return Result::Err(message); }
+            }
+        }
+
+        let end = skip_spaces(c, i);
+        if at(c, end) != "" && at(c, end) != "\n" && at(c, end) != "#" {
+            return fail(c, end, "expected the end of the line");
+        }
+        i = skip_trivia(c, end);
+    }
+    return Result::Ok(Value::Table(root));
+}
+
+fn key_value(c: [string], start: int) -> Result<([string], Value, int), string> {
+    match key_path(c, start) {
+        Result::Ok(got) => {
+            let (path, after_key) = got;
+            let equals = skip_spaces(c, after_key);
+            if at(c, equals) != "=" {
+                return fail(c, equals, "expected `=`");
+            }
+            match value(c, skip_spaces(c, equals + 1)) {
+                Result::Ok(read) => {
+                    let (v, after) = read;
+                    return Result::Ok((path, v, after));
+                }
+                Result::Err(message) => { return Result::Err(message); }
+            }
+        }
+        Result::Err(message) => { return Result::Err(message); }
+    }
+}
+
+// `a.b."c d"`
+fn key_path(c: [string], start: int) -> Result<([string], int), string> {
+    let path: [string] = [];
+    let i = skip_spaces(c, start);
+    while true {
+        match key_part(c, i) {
+            Result::Ok(got) => {
+                let (part, after) = got;
+                path = push(path, part);
+                let next = skip_spaces(c, after);
+                if at(c, next) != "." {
+                    return Result::Ok((path, after));
+                }
+                i = skip_spaces(c, next + 1);
+            }
+            Result::Err(message) => { return Result::Err(message); }
+        }
+    }
+    return fail(c, i, "expected a key");
+}
+
+fn key_part(c: [string], i: int) -> Result<(string, int), string> {
+    if at(c, i) == "\"" {
+        return basic_text(c, i);
+    }
+    if at(c, i) == "'" {
+        return literal_text(c, i);
+    }
+
+    let j = i;
+    while bare_key_char(at(c, j)) {
+        j += 1;
+    }
+    if j == i {
+        return fail(c, i, "expected a key");
+    }
+    return Result::Ok((join(c[i..j], ""), j));
+}
+
+// ----- values -----
+
+fn value(c: [string], i: int) -> Result<(Value, int), string> {
+    let first = at(c, i);
+    if first == "\"" || first == "'" {
+        let read = literal_text(c, i);
+        if first == "\"" {
+            read = basic_text(c, i);
+        }
+        match read {
+            Result::Ok(got) => {
+                let (text, after) = got;
+                return Result::Ok((Value::Text(text), after));
+            }
+            Result::Err(message) => { return Result::Err(message); }
+        }
+    }
+    if first == "[" {
+        return array(c, i);
+    }
+    if first == "{" {
+        return fail(c, i, "inline tables are not supported");
+    }
+    return scalar(c, i);
+}
+
+fn array(c: [string], start: int) -> Result<(Value, int), string> {
+    let items: [Value] = [];
+    let i = skip_trivia(c, start + 1);
+    while at(c, i) != "]" {
+        if at(c, i) == "" {
+            return fail(c, start, "this array is not closed");
+        }
+        match value(c, i) {
+            Result::Ok(got) => {
+                let (item, after) = got;
+                items = push(items, item);
+                i = skip_trivia(c, after);
+            }
+            Result::Err(message) => { return Result::Err(message); }
+        }
+        if at(c, i) == "," {
+            i = skip_trivia(c, i + 1);
+        } else if at(c, i) != "]" {
+            return fail(c, i, "expected `,` or `]`");
+        }
+    }
+    return Result::Ok((Value::Array(items), i + 1));
+}
+
+fn scalar(c: [string], start: int) -> Result<(Value, int), string> {
+    let i = start;
+    while at(c, i) != "" && !ends_scalar(at(c, i)) {
+        i += 1;
+    }
+    if i == start {
+        return fail(c, start, "expected a value");
+    }
+
+    let word = join(c[start..i], "");
+    if word == "true" {
+        return Result::Ok((Value::Bool(true), i));
+    }
+    if word == "false" {
+        return Result::Ok((Value::Bool(false), i));
+    }
+
+    let digits = replace(word, "_", "");
+    if let some(n) = parse_int(digits) {
+        return Result::Ok((Value::Int(n), i));
+    }
+    if starts_number(c[start]) {
+        if let some(x) = parse_real(digits) {
+            return Result::Ok((Value::Real(x), i));
+        }
+    }
+    return fail(c, start, "cannot read the value `" + word + "`");
+}
+
+fn literal_text(c: [string], start: int) -> Result<(string, int), string> {
+    let i = start + 1;
+    while at(c, i) != "'" {
+        if at(c, i) == "" || at(c, i) == "\n" {
+            return fail(c, start, "this string is not closed on its line");
+        }
+        i += 1;
+    }
+    return Result::Ok((join(c[start + 1..i], ""), i + 1));
+}
+
+fn basic_text(c: [string], start: int) -> Result<(string, int), string> {
+    let parts: [string] = [];
+    let i = start + 1;
+    while at(c, i) != "\"" {
+        let x = at(c, i);
+        if x == "" || x == "\n" {
+            return fail(c, start, "this string is not closed on its line");
+        }
+        if x != "\\" {
+            parts = push(parts, x);
+            i += 1;
+        } else {
+            match escape(c, i) {
+                Result::Ok(got) => {
+                    let (text, after) = got;
+                    parts = push(parts, text);
+                    i = after;
+                }
+                Result::Err(message) => { return Result::Err(message); }
+            }
+        }
+    }
+    return Result::Ok((join(parts, ""), i + 1));
+}
+
+// The backslash is at `i`.
+fn escape(c: [string], i: int) -> Result<(string, int), string> {
+    let x = at(c, i + 1);
+    if x == "n" { return Result::Ok(("\n", i + 2)); }
+    if x == "t" { return Result::Ok(("\t", i + 2)); }
+    if x == "\"" { return Result::Ok(("\"", i + 2)); }
+    if x == "\\" { return Result::Ok(("\\", i + 2)); }
+    if x == "r" { return Result::Ok((from_code(13).unwrap(), i + 2)); }
+    if x == "b" { return Result::Ok((from_code(8).unwrap(), i + 2)); }
+    if x == "f" { return Result::Ok((from_code(12).unwrap(), i + 2)); }
+    if x == "u" { return unicode(c, i, 4); }
+    if x == "U" { return unicode(c, i, 8); }
+    return fail(c, i, "unknown escape in a string");
+}
+
+fn unicode(c: [string], i: int, size: int) -> Result<(string, int), string> {
+    let code = 0;
+    for j in i + 2..i + 2 + size {
+        if let some(digit) = find("0123456789abcdef", to_lower(at(c, j))) {
+            if at(c, j) == "" {
+                return fail(c, i, "this escape is too short");
+            }
+            code = code * 16 + digit;
+        } else {
+            return fail(c, i, "expected a hexadecimal digit");
+        }
+    }
+    if let some(text) = from_code(code) {
+        return Result::Ok((text, i + 2 + size));
+    }
+    return fail(c, i, "there is no character with this number");
+}
+
+// ----- building the tree -----
+
+fn position(entries: [(string, Value)], key: string) -> int? {
+    for i in 0..entries.length() {
+        let (name, _) = entries[i];
+        if name == key {
+            return some(i);
+        }
+    }
+    return none;
+}
+
+// `entries` with the tables along `path` created where they are missing.
+fn with_table(entries: [(string, Value)], path: [string]) -> Result<[(string, Value)], string> {
+    return update(entries, path, none);
+}
+
+fn with_value(entries: [(string, Value)], path: [string], v: Value) -> Result<[(string, Value)], string> {
+    return update(entries, path, some(v));
+}
+
+fn update(entries: [(string, Value)], path: [string], v: Value?) -> Result<[(string, Value)], string> {
+    let key = path[0];
+    let found = position(entries, key);
+
+    if path.length() == 1 {
+        if let some(new) = v {
+            if found != none {
+                return Result::Err("key `" + key + "` is defined twice");
+            }
+            return Result::Ok(push(entries, (key, new)));
+        }
+    }
+
+    let inner: [(string, Value)] = [];
+    if let some(i) = found {
+        let (_, existing) = entries[i];
+        if let Value::Table(table) = existing {
+            inner = table;
+        } else {
+            return Result::Err("`" + key + "` is not a table");
+        }
+    }
+
+    let result = Result::Ok(inner);
+    if path.length() > 1 {
+        result = update(inner, path[1..], v);
+    }
+
+    match result {
+        Result::Ok(updated) => {
+            if let some(i) = found {
+                entries[i] = (key, Value::Table(updated));
+                return Result::Ok(entries);
+            }
+            return Result::Ok(push(entries, (key, Value::Table(updated))));
+        }
+        Result::Err(message) => { return Result::Err(message); }
+    }
+}
+
+// ----- reading values out -----
+
+// The value at a path of keys joined by dots, like "server.port".
+fn get(document: Value, path: string) -> Value? {
+    let here = document;
+    for key in split(path, ".") {
+        if let Value::Table(entries) = here {
+            if let some(i) = position(entries, key) {
+                let (_, next) = entries[i];
+                here = next;
+            } else {
+                return none;
+            }
+        } else {
+            return none;
+        }
+    }
+    return some(here);
+}
+
+fn as_text(v: Value?) -> string? {
+    if let some(x) = v {
+        if let Value::Text(text) = x {
+            return some(text);
+        }
+    }
+    return none;
+}
+
+fn as_int(v: Value?) -> int? {
+    if let some(x) = v {
+        if let Value::Int(n) = x {
+            return some(n);
+        }
+    }
+    return none;
+}
+
+// An integer is a real number too: `1` can be read as `1.0`.
+fn as_real(v: Value?) -> real? {
+    if let some(x) = v {
+        if let Value::Real(r) = x {
+            return some(r);
+        }
+        if let Value::Int(n) = x {
+            return some(real(n));
+        }
+    }
+    return none;
+}
+
+fn as_bool(v: Value?) -> bool? {
+    if let some(x) = v {
+        if let Value::Bool(b) = x {
+            return some(b);
+        }
+    }
+    return none;
+}
+
+fn as_array(v: Value?) -> [Value]? {
+    if let some(x) = v {
+        if let Value::Array(items) = x {
+            return some(items);
+        }
+    }
+    return none;
+}
+
+// The names in a table, in the order of the file.
+fn keys(v: Value?) -> [string]? {
+    if let some(x) = v {
+        if let Value::Table(entries) = x {
+            let names: [string] = [];
+            for entry in entries {
+                let (name, _) = entry;
+                names = push(names, name);
+            }
+            return some(names);
+        }
+    }
+    return none;
+}
+
+// ----- characters -----
+
+const RETURN: string = from_code(13).unwrap();
+
+fn at(c: [string], i: int) -> string {
+    if i < c.length() {
+        return c[i];
+    }
+    return "";
+}
+
+fn listed(items: [string], wanted: string) -> bool {
+    for item in items {
+        if item == wanted {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn bare_key_char(x: string) -> bool {
+    return (x >= "a" && x <= "z") || (x >= "A" && x <= "Z") || is_digit(x) || x == "_" || x == "-";
+}
+
+fn starts_number(x: string) -> bool {
+    return is_digit(x) || x == "+" || x == "-" || x == ".";
+}
+
+fn ends_scalar(x: string) -> bool {
+    return x == "," || x == "]" || x == "#" || x == " " || x == "\t" || x == "\n" || x == RETURN;
+}
+
+fn skip_spaces(c: [string], start: int) -> int {
+    let i = start;
+    while at(c, i) == " " || at(c, i) == "\t" || at(c, i) == RETURN {
+        i += 1;
+    }
+    return i;
+}
+
+// Past spaces, line breaks and comments.
+fn skip_trivia(c: [string], start: int) -> int {
+    let i = skip_spaces(c, start);
+    while at(c, i) == "\n" || at(c, i) == "#" {
+        while at(c, i) != "" && at(c, i) != "\n" {
+            i += 1;
+        }
+        if at(c, i) == "\n" {
+            i += 1;
+        }
+        i = skip_spaces(c, i);
+    }
+    return i;
+}
+
+// An error that says which line it is on.
+fn fail<T>(c: [string], i: int, message: string) -> Result<T, string> {
+    let line = 1;
+    for j in 0..min(i, c.length()) {
+        if c[j] == "\n" {
+            line += 1;
+        }
+    }
+    return Result::Err("line " + string(line) + ": " + message);
+}

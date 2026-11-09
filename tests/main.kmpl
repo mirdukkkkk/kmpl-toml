@@ -1,0 +1,79 @@
+// Stops with an error if `kmpl-toml` does not behave.
+
+import (read_text) from "std:fs";
+import (Value, Result, parse, get, as_text, as_int, as_real, as_bool, as_array, keys) from "../mod.kmpl";
+
+fn check(condition: bool, what: string) {
+    if !condition {
+        panic("failed: " + what);
+    }
+}
+
+fn document() -> Value {
+    let (text, error) = read_text("tests/sample.toml");
+    if error != "" {
+        panic(error);
+    }
+    match parse(text) {
+        Result::Ok(v) => { return v; }
+        Result::Err(message) => { panic(message); }
+    }
+}
+
+// The message of a document that must be refused.
+fn error_of(source: string) -> string {
+    match parse(source) {
+        Result::Ok(_) => { panic("accepted: " + source); }
+        Result::Err(message) => { return message; }
+    }
+}
+
+fn main() {
+    let d = document();
+
+    check(d.get("title").as_text() == some("kmpl"), "text");
+    check(d.get("literal").as_text() == some("C:\\path"), "literal text");
+    check(d.get("escaped").as_text() == some("a\tbA"), "escapes");
+    check(d.get("count").as_int() == some(1000), "underscores");
+    check(d.get("negative").as_int() == some(-5), "negative");
+    check(d.get("pi").as_real() == some(3.14), "real");
+    check(d.get("big").as_real() == some(1000.0), "exponent");
+    check(d.get("count").as_real() == some(1000.0), "an int read as a real");
+    check(d.get("on").as_bool() == some(true), "true");
+    check(d.get("off").as_bool() == some(false), "false");
+    check(d.get("a.b").as_int() == some(1), "dotted key");
+    check(d.get("quoted key").as_int() == some(2), "quoted key");
+
+    check(d.get("server.port").as_int() == some(8080), "table");
+    check(d.get("server.host.name").as_text() == some("local"), "dotted key in a table");
+    check(d.get("server.tls.enabled").as_bool() == some(true), "nested table");
+
+    check(d.get("nope") == none, "missing key");
+    check(d.get("title.more") == none, "a key inside a value");
+    check(d.get("title").as_int() == none, "wrong type");
+
+    let items = d.get("items").as_array().unwrap();
+    check(items.length() == 3, "multi-line array");
+    check(some(items[2]).as_int() == some(3), "array element");
+    check(d.get("mixed").as_array().unwrap().length() == 2, "mixed array");
+    check(d.get("empty").as_array().unwrap().length() == 0, "empty array");
+    check(d.get("nested").as_array().unwrap().length() == 2, "nested array");
+
+    check(d.get("server").keys().unwrap()[0] == "port", "keys in order");
+
+    check(error_of("a = 1\na = 2") == "line 2: key `a` is defined twice", "a duplicate key");
+    check(error_of("[t]\n[t]") == "line 2: table `t` is defined twice", "a duplicate table");
+    check(error_of("a = 1\n[a]") == "line 2: `a` is not a table", "a table over a value");
+    check(error_of("a") == "line 1: expected `=`", "no equals sign");
+    check(error_of("a = ") == "line 1: expected a value", "no value");
+    check(error_of("a = 1 2") == "line 1: expected the end of the line", "two values");
+    check(error_of("a = nope") == "line 1: cannot read the value `nope`", "a bad value");
+    check(error_of("a = \"b") == "line 1: this string is not closed on its line", "an open string");
+    check(error_of("a = [1") == "line 1: expected `,` or `]`", "an open array");
+    check(error_of("a = {}") == "line 1: inline tables are not supported", "an inline table");
+    check(error_of("[[a]]") == "line 1: arrays of tables are not supported", "an array of tables");
+    check(error_of("a = \"\\q\"") == "line 1: unknown escape in a string", "a bad escape");
+    check(error_of("\n\n= 1") == "line 3: expected a key", "the line of an error");
+
+    print("all tests passed");
+}

@@ -1,0 +1,25 @@
+# a comment
+title = "kmpl" # after a value
+literal = 'C:\path'
+escaped = "a\tb\u0041"
+count = 1_000
+negative = -5
+pi = 3.14
+big = 1e3
+on = true
+off = false
+items = [1, 2,
+  3, # inside
+]
+mixed = ["a", 1]
+empty = []
+nested = [[1], [2, 3]]
+a.b = 1
+"quoted key" = 2
+
+[server]
+port = 8080
+host.name = "local"
+
+[server.tls]
+enabled = true

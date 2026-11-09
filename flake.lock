@@ -1,0 +1,50 @@
+{
+  "nodes": {
+    "kmpl": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1794224450,
+        "narHash": "sha256-Nm6xeMEtaHFCb4Si8fRQwwzsKhnMsOxvvHray2hop7M=",
+        "owner": "mirdukkkkk",
+        "repo": "kmpl",
+        "rev": "2f2ea2adf01b9796b2366ef116d0c268f892cb31",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mirdukkkkk",
+        "ref": "v0.3.0",
+        "repo": "kmpl",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793726008,
+        "narHash": "sha256-jQp1wKvbwWdLBASTXkSi/VYmDJ5AbBi1WvcMt9HWJC8=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "1d060086d60cb76a40cf37109f979d88a5bd6396",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "kmpl": "kmpl",
+        "nixpkgs": [
+          "kmpl",
+          "nixpkgs"
+        ]
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
