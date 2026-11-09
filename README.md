@@ -4,8 +4,10 @@ A TOML reader for [kmpl](https://github.com/mirdukkkkk/kmpl), written in kmpl.
 It needs kmpl 0.3.0 or newer.
 
 ```sh
-kmpl add https://github.com/mirdukkkkk/kmpl-toml/master
+kmpl add https://github.com/mirdukkkkk/kmpl-toml/v0.0.1
 ```
+
+This adds it under the name `kmpl-toml`, pinned in `kmpl.lock`.
 
 ```text
 import (parse, get, as_int, as_text, Result) from "kmpl-toml";
